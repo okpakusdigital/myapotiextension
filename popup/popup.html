@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MyApoti Sync</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <!-- ── Header ── -->
+  <div class="header">
+    <div class="header-left">
+      <div class="logo-placeholder">M</div>
+      <div>
+        <h1>MyApoti Sync</h1>
+        <p class="subtitle">Universal HMIS Connector</p>
+      </div>
+    </div>
+    <div id="badge" class="badge badge-off">OFF</div>
+  </div>
+
+  <!-- ── Desktop status ── -->
+  <div id="desktop-status" class="desktop-status">
+    Checking MyApoti Desktop...
+  </div>
+
+  <!-- ── Active pharmacy banner ── -->
+  <div id="active-banner" class="active-banner"
+       style="display:none">
+    <span id="active-platform"></span>
+    <span id="active-page"></span>
+  </div>
+
+  <!-- ── Login view ── -->
+  <div id="login-view" class="view">
+
+    <div class="status-card disconnected">
+      <span class="status-dot"></span>
+      Not connected to MyApoti
+    </div>
+
+    <p class="hint">
+      Connect your MyApoti account to automatically
+      sync your pharmacy inventory to the desktop app.
+    </p>
+
+    <div class="form-group">
+      <label for="email">Phone Number</label>
+      <input
+        type="tel"
+        id="phone"
+        placeholder="08012345678"
+        autocomplete="tel"
+      />
+    </div>
+
+    <div class="form-group">
+      <label for="password">Password</label>
+      <div class="password-wrap">
+        <input
+          type="password"
+          id="password"
+          placeholder="••••••••"
+          autocomplete="current-password"
+        />
+        <button class="toggle-pw" id="toggle-pw" type="button">
+          👁
+        </button>
+      </div>
+    </div>
+
+    <button class="btn-primary" id="login-btn">
+      🔗 Connect to MyApoti
+    </button>
+
+    <p id="login-error" class="error-msg"></p>
+
+  </div>
+
+  <!-- ── Connected view ── -->
+  <div id="connected-view" class="view" style="display:none">
+
+    <div class="status-card connected">
+      <span class="status-dot"></span>
+      <span id="connected-email"></span>
+    </div>
+
+    <!-- ── RetailMan active banner ── -->
+    <!-- Shown when RetailMan sync is ON in MyApoti desktop.        -->
+    <!-- Extension sync is blocked — RetailMan is source of truth.  -->
+    <!-- Hidden by default, shown via applyRetailmanBlockState().    -->
+    <div id="retailman-banner" style="
+      display: none;
+      background: #fff8e1;
+      border: 1px solid #ffc107;
+      border-left: 4px solid #f59e0b;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    ">
+      <div style="
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 5px;
+      ">
+        <span style="font-size: 1rem;">🔗</span>
+        <span style="
+          font-weight: 700;
+          color: #92400e;
+          font-size: 0.82rem;
+          letter-spacing: 0.01em;
+        ">RetailMan Sync is Active</span>
+      </div>
+      <p id="retailman-banner-msg" style="
+        font-size: 0.76rem;
+        color: #92400e;
+        line-height: 1.5;
+        margin: 0;
+      ">
+        RetailMan sync is active — extension disabled.
+      </p>
+      <p style="
+        font-size: 0.72rem;
+        color: #b45309;
+        margin: 6px 0 0;
+        font-style: italic;
+      ">
+        To use the extension, disable RetailMan sync in<br/>
+        MyApoti → Settings → POS Connectors.
+      </p>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <span class="stat-value" id="drugs-synced">0</span>
+        <span class="stat-label">Drugs Synced</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value" id="sales-captured">0</span>
+        <span class="stat-label">Sales Captured</span>
+      </div>
+    </div>
+
+    <div class="last-sync"
+         id="last-sync-row"
+         style="display:none">
+      🕐 Last sync: <span id="last-sync-time"></span>
+    </div>
+
+    <div class="info-box">
+      <p class="section-label">Auto-syncing from:</p>
+      <div class="info-item">✅ Drug Register → inventory</div>
+      <div class="info-item">✅ Billing page → stock deductions</div>
+      <div class="info-item">✅ Receive Goods → stock additions</div>
+      <div class="info-item">✅ Add Drug form → new items</div>
+    </div>
+
+    <div class="info-box">
+      <p class="section-label">Supported systems:</p>
+      <div class="info-item">🖥 VirtualRx Web</div>
+      <div class="info-item">🖥 Any web-based HMIS</div>
+    </div>
+
+    <button class="btn-primary" id="sync-now-btn">
+      🔄 Sync Now
+    </button>
+
+    <button class="btn-secondary" id="logout-btn">
+      Disconnect Account
+    </button>
+
+    <p id="sync-msg" class="sync-msg"></p>
+
+  </div>
+
+  <!-- ── Footer ── -->
+  <div class="footer">
+    <a href="https://myapoti.com" target="_blank">
+      myapoti.com
+    </a>
+    <span>v2.0.0</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
