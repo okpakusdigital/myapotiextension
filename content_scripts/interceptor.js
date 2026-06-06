@@ -146,19 +146,29 @@
 
     let requestId = null;
 
-    // Store outgoing POST body before sending
-    if (method === "POST") {
+    // ── Store outgoing POST / PUT / PATCH / DELETE BEFORE sending ──
+    // parseBody must complete before the fetch starts so the
+    // store is populated before the response can arrive.
+    // A fast server could respond before an async .then() runs,
+    // causing consumeRequest to return null (race condition).
+    // PUT/PATCH: drug edits (PUT /api/drugs/:id)
+    // DELETE: drug deletions — only synced on confirmed 2xx response.
+    //   A confirmed DELETE is intentional by definition.
+    //   Same store-then-confirm logic applies.
+    //   DELETE bodies are usually empty so we store the URL instead.
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
       const type = classifyUrl(url);
       if (type) {
         requestId = generateId();
-        // Parse body asynchronously — don't block the request
-        parseBody(options?.body).then(parsedBody => {
-          storeRequest(requestId, url, parsedBody, type);
-        });
+        // DELETE requests usually have no body — store URL as identifier
+        const parsedBody = method === "DELETE"
+          ? { __delete: true, __url: url }
+          : await parseBody(options?.body);
+        storeRequest(requestId, url, parsedBody, type);
       }
     }
 
-    // Send the real request
+    // Send the real request — store is guaranteed populated now
     const response = await originalFetch.apply(this, args);
 
     // On response — check if we stored a request for this
@@ -200,16 +210,30 @@
     }
 
     send(body) {
-      // Store outgoing POST body
-      if (this._method?.toUpperCase() === "POST") {
+      // ── Store outgoing POST / PUT / PATCH / DELETE body ──
+      // XHR send() is synchronous but parseBody is async.
+      // We can't await inside send() so we attach the load listener
+      // first, then parse the body in parallel. The load event only
+      // fires after the full round-trip so parseBody (a few microseconds)
+      // always completes before consumeRequest is called.
+      // PUT/PATCH: drug edits. DELETE: confirmed deletions.
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(this._method?.toUpperCase())) {
         const type = classifyUrl(this._url);
         if (type) {
           this._xhrId = generateId();
-          const id    = this._xhrId;
-          const url   = this._url;
-          parseBody(body).then(parsedBody => {
-            storeRequest(id, url, parsedBody, type);
-          });
+          const id     = this._xhrId;
+          const url    = this._url;
+          const method = this._method?.toUpperCase();
+          // DELETE requests have no body — store URL marker instead.
+          // parseBody completes in microseconds — well before
+          // any real server round-trip, so no race condition here.
+          if (method === "DELETE") {
+            storeRequest(id, url, { __delete: true, __url: url }, type);
+          } else {
+            parseBody(body).then(parsedBody => {
+              storeRequest(id, url, parsedBody, type);
+            });
+          }
         }
       }
 
@@ -225,11 +249,8 @@
               const responseBody = JSON.parse(this.responseText);
               dispatchCapture(stored.type, this._url, stored.body, responseBody);
             } catch {
-              // Response not JSON — dispatch with null response
-              const stored2 = consumeRequest(this._xhrId);
-              if (stored2) {
-                dispatchCapture(stored2.type, this._url, stored2.body, null);
-              }
+              // Response not JSON — dispatch with null response body
+              dispatchCapture(stored.type, this._url, stored.body, null);
             }
           }
         } else {
@@ -352,4 +373,4 @@
     }
   };
 
-})();     
+})();

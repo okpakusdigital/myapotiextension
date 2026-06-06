@@ -1,6 +1,6 @@
 {
   "name": "MyApoti Sync",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "manifest_version": 3,
   "description": "Automatically sync any pharmacy HMIS to MyApoti desktop app.",
   "permissions": [
@@ -19,6 +19,12 @@
     "type": "module"
   },
   "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content_scripts/interceptor.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
     {
       "matches": ["<all_urls>"],
       "js": [
