@@ -57,8 +57,6 @@
     });
 
     // ── Path 2: DOM scraping for inventory pages ──
-    // This reads the drug register table when the pharmacist
-    // is on the inventory page. Separate from sale capture.
     if (pageType === "inventory") {
       handleInventoryPage();
     }
@@ -77,8 +75,6 @@
 
   // ══════════════════════════════════════════════════════
   // PATH 1 — REQUEST INTERCEPTION HANDLER
-  // Receives server-confirmed data from interceptor.js.
-  // This fires for sales, stock receipts, and drug adds.
   // ══════════════════════════════════════════════════════
 
   window.addEventListener("myapoti_capture", (e) => {
@@ -107,17 +103,25 @@
     const items = extractSaleItems(payload);
     if (!items.length) return;
 
-    // Deduplicate — same sale may fire multiple events in SPAs
     const saleHash = utils.hashString(JSON.stringify(items));
-    chrome.storage.local.get("last_sale_hash", ({ last_sale_hash }) => {
-      if (last_sale_hash === saleHash) {
-        console.log("MyApoti: Sale already captured — skipping duplicate");
+    const now = Date.now();
+
+    // Dedup window: 5 seconds — prevents double-fire from SPA re-renders
+    // but always allows a new sale after 5 seconds even if items are identical
+    const DEDUP_WINDOW_MS = 5000;
+
+    chrome.storage.local.get(["last_sale_hash", "last_sale_time"], ({ last_sale_hash, last_sale_time }) => {
+      const timeSinceLast = now - (last_sale_time || 0);
+      const isDuplicate = last_sale_hash === saleHash && timeSinceLast < DEDUP_WINDOW_MS;
+
+      if (isDuplicate) {
+        console.log(`MyApoti: Sale duplicate suppressed (${timeSinceLast}ms since last — within ${DEDUP_WINDOW_MS}ms window)`);
         return;
       }
 
       chrome.storage.local.set({
         last_sale_hash: saleHash,
-        last_sale_time: Date.now(),
+        last_sale_time: now,
       });
 
       console.log(`MyApoti: Sale confirmed by server — ${items.length} items`);
@@ -142,18 +146,15 @@
 
 
   // ── Extract sale items from HMIS payload ──
-  // Tries response first (server-confirmed), then request (fallback).
-  // Handles the many different field name conventions across HMIS systems.
   function extractSaleItems(payload) {
     const sources = [
-      payload?.response,  // server confirmed — most reliable
-      payload?.request,   // what was sent — fallback
+      payload?.response,
+      payload?.request,
     ];
 
     for (const source of sources) {
       if (!source) continue;
 
-      // Try all common array field names across HMIS systems
       const candidates = [
         source?.items,
         source?.drugs,
@@ -202,7 +203,6 @@
         }
       }
 
-      // Single item sale (no array — entire body is one item)
       const name = (
         source?.name          ||
         source?.drug_name     ||
@@ -277,7 +277,6 @@
               item.received_qty      ||
               0
             ),
-            // Batch fields — pass through if HMIS sends them
             batch_number:    item.batch_number    || item.batch_no    || item.lot_number || null,
             expiration_date: item.expiration_date || item.expiry_date || item.expiry     || null,
             nafdac_number:   item.nafdac_number   || item.nafdac      || item.reg_no     || null,
@@ -290,9 +289,6 @@
   }
 
 
-  // ── Extract batch array from HMIS payload ──
-  // Returns array of batch objects if found, empty array otherwise.
-  // HMIS systems that track batches will include them in the POST body.
   function extractBatches(payload) {
     const sources = [payload?.response, payload?.request];
     for (const source of sources) {
@@ -320,17 +316,10 @@
   }
 
 
-  // ── Captured drug add/edit handler ──
-  // Required: at least one name field + price.
-  // Optional: quantity, category, strength, etc.
-  // Checks request first (has the actual data),
-  // then response (server confirmation — may echo fields).
   function handleCapturedDrug(url, payload) {
     const res = payload?.response || {};
     const req = payload?.request  || {};
 
-    // ── Extract name — try every common field name ──
-    // req checked first — response often only has id/status
     const name = (
       req.generic_name  || res.generic_name  ||
       req.brand_name    || res.brand_name    ||
@@ -338,13 +327,11 @@
       req.drug_name     || res.drug_name     ||
       req.product_name  || res.product_name  ||
       req.description   || res.description   ||
-      // Check nested under res.drug (some servers echo full object)
       res.drug?.generic_name || res.drug?.name ||
       res.drug?.brand_name   ||
       ""
     ).trim();
 
-    // ── Extract price — req first ──
     const price = utils.parsePrice(
       req.price            || res.price            ||
       req.selling_price    || res.selling_price    ||
@@ -354,14 +341,12 @@
       "0"
     );
 
-    // ── Quantity — 0 is valid (drug with no stock) ──
     const quantity = parseInt(
       req.quantity || res.quantity ||
       req.qty      || res.qty      ||
       res.drug?.quantity || "0"
     ) || 0;
 
-    // Only name and price are strictly required
     if (!name) {
       console.log("MyApoti: Drug capture — name missing, skipping", { req, res });
       return;
@@ -389,11 +374,10 @@
         dosage_form:     req.dosage_form     || res.dosage_form     || req.form   || res.form,
         expiration_date: utils.parseDate(req.expiry_date   || res.expiry_date   || req.expiration_date || res.expiration_date),
         nafdac_number:   req.nafdac_number   || res.nafdac_number   || req.barcode || res.barcode || req.sku || res.sku,
-        batches,         // empty array if HMIS doesn't send batch data — ignored by backend
+        batches,
       }],
     }).then(result => {
       if (!result) return;
-      // Warn if quantity update was ignored for batch-managed drugs
       if (result.batch_qty_ignored?.length) {
         console.warn(
           `%cMyApoti%c Quantity update ignored for batch-managed drug(s): ${result.batch_qty_ignored.join(", ")}. ` +
@@ -406,30 +390,18 @@
   }
 
 
-  // ── Captured drug delete handler ──
-  // Only fires after server returns 2xx — confirmed intentional deletion.
-  // Sends soft-delete request to MyApoti.
-  // MyApoti marks the item as deleted but preserves sales history.
   function handleCapturedDelete(url, payload) {
-    // Extract drug name from URL — most HMIS delete endpoints are:
-    //   DELETE /api/drugs/123
-    //   DELETE /api/inventory/Paracetamol-500Mg
-    //   DELETE /api/products?name=Paracetamol
-    // Also check query params and response body for the name.
     const res = payload?.response || {};
     const req = payload?.request  || {};
 
-    // Try response first (server may echo the deleted item)
     const name = (
       res.generic_name  || res.name || res.drug_name  || res.product_name ||
       req.generic_name  || req.name || req.drug_name  || req.product_name ||
-      // Try extracting from URL path — /api/drugs/Paracetamol-500Mg
       decodeURIComponent(url.split("/").pop().split("?")[0].replace(/-/g, " ")) ||
       ""
     ).trim();
 
     if (!name || name.match(/^\d+$/)) {
-      // Pure numeric ID with no name — can't identify the drug
       console.log("MyApoti: Drug delete confirmed but name unknown — skipping", url);
       return;
     }
@@ -453,10 +425,6 @@
   }
 
 
-  // ── Captured batch update handler ──
-  // Fires when HMIS sends PUT /api/batches/:batch_number
-  // Drug name is included to scope the batch correctly —
-  // different drugs can share the same batch number.
   function handleCapturedBatchUpdate(url, payload) {
     const res = payload?.response || {};
     const req  = payload?.request  || {};
@@ -473,7 +441,6 @@
       return;
     }
 
-    // Drug name — used to scope the batch to the correct inventory item
     const drug_name = (
       req.drug_name || req.generic_name || req.name ||
       res.drug_name || res.generic_name || res.name || ""
@@ -492,8 +459,6 @@
 
     console.log(`MyApoti: Batch update confirmed — ${batch_number}${drug_name ? " on " + drug_name : ""}`);
 
-    // Pass drug_name as query param to scope batch to correct drug
-    // Required when multiple drugs share the same batch number
     const batchEndpoint = drug_name
       ? `/pharmacies/batches/${encodeURIComponent(batch_number)}?drug_name=${encodeURIComponent(drug_name)}`
       : `/pharmacies/batches/${encodeURIComponent(batch_number)}`;
@@ -514,9 +479,6 @@
   }
 
 
-  // ── Captured batch delete handler ──
-  // Fires when HMIS sends DELETE /api/batches/:batch_number (confirmed 2xx)
-  // Drug name scopes the delete to the correct inventory item.
   function handleCapturedBatchDelete(url, payload) {
     const res = payload?.response || {};
     const req  = payload?.request  || {};
@@ -554,9 +516,6 @@
 
   // ══════════════════════════════════════════════════════
   // PATH 2 — DOM SCRAPING (inventory page fallback)
-  // Used when pharmacist views the drug register.
-  // No POST requests fire on this page — scraping is
-  // the only way to read the inventory list.
   // ══════════════════════════════════════════════════════
 
   function handleInventoryPage(silent = false) {
@@ -609,10 +568,6 @@
     const { drugs, confidence } = reader.readRows();
     if (!drugs.length) return;
 
-    // FIX 5: minimum field requirement — must have drug name + price mapped.
-    // A table with only one field detected is almost certainly not an inventory
-    // table (e.g. a navigation menu, a form label table, etc).
-    // Require at least: generic_name (or brand_name) AND price.
     const hasName  = reader.colMap.generic_name !== undefined || reader.colMap.brand_name !== undefined;
     const hasPrice = reader.colMap.price !== undefined;
     if (!hasName || !hasPrice) {
@@ -723,8 +678,6 @@
     });
   }
 
-
-  // ── Force sync (triggered from popup Sync Now button) ──
   function forceSync() {
     chrome.storage.local.remove("inventory_hash", () => {
       syncInventory(true, false);
