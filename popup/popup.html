@@ -26,8 +26,7 @@
   </div>
 
   <!-- ── Active pharmacy banner ── -->
-  <div id="active-banner" class="active-banner"
-       style="display:none">
+  <div id="active-banner" class="active-banner" style="display:none">
     <span id="active-platform"></span>
     <span id="active-page"></span>
   </div>
@@ -87,9 +86,6 @@
     </div>
 
     <!-- ── RetailMan active banner ── -->
-    <!-- Shown when RetailMan sync is ON in MyApoti desktop.        -->
-    <!-- Extension sync is blocked — RetailMan is source of truth.  -->
-    <!-- Hidden by default, shown via applyRetailmanBlockState().    -->
     <div id="retailman-banner" style="
       display: none;
       background: #fff8e1;
@@ -132,10 +128,11 @@
       </p>
     </div>
 
+    <!-- ── Stats grid ── -->
     <div class="stats-grid">
       <div class="stat-card">
         <span class="stat-value" id="drugs-synced">0</span>
-        <span class="stat-label">Drugs Synced</span>
+        <span class="stat-label">Drugs in DB</span>
       </div>
       <div class="stat-card">
         <span class="stat-value" id="sales-captured">0</span>
@@ -143,10 +140,44 @@
       </div>
     </div>
 
-    <div class="last-sync"
-         id="last-sync-row"
-         style="display:none">
+    <!-- ── Last sync time ── -->
+    <div class="last-sync" id="last-sync-row" style="display:none">
       🕐 Last sync: <span id="last-sync-time"></span>
+    </div>
+
+    <!-- ── Cloud sync queue status ── -->
+    <!-- Shows how many items are pending/failed cloud upload.     -->
+    <!-- Populated from queue_pending / queue_failed in API response. -->
+    <div id="queue-status-row" style="
+      display: none;
+      font-size: 0.76rem;
+      padding: 6px 10px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      background: rgba(59,130,246,0.08);
+      border: 1px solid rgba(59,130,246,0.2);
+      color: #1d4ed8;
+      display: none;
+      align-items: center;
+      gap: 6px;
+    ">
+      ⏳ <span id="queue-pending-count">0</span> items pending cloud upload
+    </div>
+
+    <div id="queue-failed-row" style="
+      display: none;
+      font-size: 0.76rem;
+      padding: 6px 10px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      background: rgba(239,68,68,0.07);
+      border: 1px solid rgba(239,68,68,0.2);
+      color: #dc2626;
+      align-items: center;
+      gap: 6px;
+    ">
+      ❌ <span id="queue-failed-count">0</span> items failed to upload —
+      <span style="font-style:italic">check sync settings</span>
     </div>
 
     <div class="info-box">
@@ -160,6 +191,25 @@
     <div class="info-box">
       <p class="section-label">Supported systems:</p>
       <div class="info-item">🖥 Any web-based HMIS</div>
+    </div>
+
+    <!-- ── Recently synced drugs feed ── -->
+    <div id="recent-syncs-section" style="display:none; margin-bottom:12px;">
+      <div style="
+        font-size: 0.70rem;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: #9ca3af;
+        margin-bottom: 8px;
+      ">Recently synced</div>
+      <div id="recent-syncs-list" style="
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 0.76rem;
+      "></div>
     </div>
 
     <button class="btn-primary" id="sync-now-btn">
@@ -176,9 +226,7 @@
 
   <!-- ── Footer ── -->
   <div class="footer">
-    <a href="https://myapoti.com" target="_blank">
-      myapoti.com
-    </a>
+    <a href="https://myapoti.com" target="_blank">myapoti.com</a>
     <span>v2.0.0</span>
   </div>
 

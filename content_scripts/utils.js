@@ -6,6 +6,16 @@ window.MyApotiUtils = {
   // ── Desktop app URL ──
   MYAPOTI_API: "http://localhost:8000",
 
+  // ── Buffer config ──
+  // Operations that fail because the backend isn't reachable yet (desktop
+  // app still booting) are queued here instead of being dropped. Stored in
+  // chrome.storage.local (not a plain in-memory array) so the queue survives
+  // a page navigation, tab close, or service worker restart — any of which
+  // would wipe an in-memory buffer mid-wait.
+  PENDING_QUEUE_KEY: "myapoti_pending_operations",
+  RETRY_INTERVAL_MS: 5000,
+  _retryTimer: null,
+
   // ── Check if desktop app is running ──
   async isDesktopRunning() {
     try {
@@ -31,10 +41,101 @@ window.MyApotiUtils = {
     });
   },
 
+  // ── Read the pending operations queue ──
+  _getPendingQueue() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get(this.PENDING_QUEUE_KEY, (data) => {
+        resolve(Array.isArray(data[this.PENDING_QUEUE_KEY]) ? data[this.PENDING_QUEUE_KEY] : []);
+      });
+    });
+  },
+
+  // ── Write the pending operations queue ──
+  _setPendingQueue(queue) {
+    return new Promise((resolve) => {
+      chrome.storage.local.set({ [this.PENDING_QUEUE_KEY]: queue }, resolve);
+    });
+  },
+
+  // ── Add one operation to the queue ──
+  async _enqueueOperation(endpoint, payload, method) {
+    const queue = await this._getPendingQueue();
+    queue.push({
+      endpoint,
+      payload,
+      method,
+      queued_at: Date.now(),
+    });
+    await this._setPendingQueue(queue);
+    return queue.length;
+  },
+
+  // ── Retry every queued operation once the backend is reachable ──
+  // Polls every RETRY_INTERVAL_MS. On each tick, checks the backend once;
+  // if up, replays every queued operation in order via the real
+  // sendToMyApoti (skipping the queue path since the backend is confirmed
+  // reachable for this tick), then clears the queue. If any individual
+  // operation fails for a non-connectivity reason (4xx/5xx), it is dropped
+  // from the queue same as it would be on a normal call — only
+  // connectivity failures get re-queued.
+  startRetryLoop() {
+    if (this._retryTimer) return; // already running
+
+    this._retryTimer = setInterval(async () => {
+      const queue = await this._getPendingQueue();
+      if (queue.length === 0) {
+        clearInterval(this._retryTimer);
+        this._retryTimer = null;
+        return;
+      }
+
+      const running = await this.isDesktopRunning();
+      if (!running) {
+        console.log(`MyApoti: Still offline — ${queue.length} operation(s) remain queued`);
+        return;
+      }
+
+      // Backend is up — snapshot and clear the queue, then replay each
+      // operation. Use _sendDirect (bypasses the queueing check) so a
+      // mid-replay connectivity blip re-queues only what's left.
+      await this._setPendingQueue([]);
+
+      console.log(`MyApoti: Backend back online — replaying ${queue.length} queued operation(s)`);
+
+      for (const op of queue) {
+        await this._sendDirect(op.endpoint, op.payload, op.method, true);
+      }
+
+      const remaining = await this._getPendingQueue();
+      if (remaining.length === 0) {
+        clearInterval(this._retryTimer);
+        this._retryTimer = null;
+        chrome.runtime.sendMessage({ action: "desktop_back_online" });
+        console.log("MyApoti: ✅ Queue fully flushed");
+      } else {
+        console.log(`MyApoti: ${remaining.length} operation(s) still queued after replay`);
+      }
+    }, this.RETRY_INTERVAL_MS);
+  },
+
   // ── Send data to desktop app ──
   // method defaults to POST. Pass "PUT" or "DELETE" for batch operations.
   // DELETE requests send no body.
+  //
+  // If the backend isn't reachable, the operation is queued (instead of
+  // dropped) and a retry loop is started to flush it automatically once
+  // the backend comes online — covers every operation type that funnels
+  // through here: sales, stock receipts, drug add/edit, drug delete,
+  // batch update, batch delete.
   async sendToMyApoti(endpoint, payload, method = "POST") {
+    return this._sendDirect(endpoint, payload, method, false);
+  },
+
+  // ── Internal — actual send logic ──
+  // isReplay=true skips the queueing step on connectivity failure and
+  // instead lets the caller (startRetryLoop) decide whether to re-queue,
+  // preventing infinite recursion between sendToMyApoti and the retry loop.
+  async _sendDirect(endpoint, payload, method, isReplay) {
     const token = await this.getToken();
     if (!token) {
       console.log("MyApoti: Not logged in — skipping sync");
@@ -44,7 +145,21 @@ window.MyApotiUtils = {
     const running = await this.isDesktopRunning();
     if (!running) {
       console.warn("MyApoti: Desktop app not running");
-      chrome.runtime.sendMessage({ action: "desktop_offline" });
+
+      // ── Queue instead of dropping ──
+      // Only queue on the original call, not during a replay tick — if a
+      // replay attempt itself can't reach the backend, the outer
+      // startRetryLoop already detected that via its own isDesktopRunning()
+      // check and will simply try again next tick with the still-queued item.
+      if (!isReplay) {
+        const queueLength = await this._enqueueOperation(endpoint, payload, method);
+        console.log(`MyApoti: Operation queued (${queueLength} pending) — will retry when desktop app is ready`);
+        chrome.runtime.sendMessage({ action: "desktop_offline" });
+        this.startRetryLoop();
+      } else {
+        // Replay hit a connectivity failure mid-batch — put it back.
+        await this._enqueueOperation(endpoint, payload, method);
+      }
       return null;
     }
 

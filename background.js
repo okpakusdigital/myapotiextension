@@ -18,9 +18,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
   }
 
-  if (msg.action === "desktop_offline") {
+  // ── content.js's notifyBackground() sends { type, ...data }, not
+  //    { action, ...data } — check both fields so this fires correctly
+  //    regardless of which the sender used.
+  if (msg.action === "desktop_offline" || msg.type === "desktop_offline") {
     chrome.action.setBadgeText({ text: "!" });
     chrome.action.setBadgeBackgroundColor({ color: "#ffc107" });
+  }
+
+  // ── Backend came back online and the buffered drug batch was flushed —
+  //    clear the "!" badge set above.
+  if (msg.action === "desktop_back_online" || msg.type === "desktop_back_online") {
+    chrome.action.setBadgeText({ text: "", tabId: sender.tab?.id });
   }
 
   if (msg.action === "token_expired") {
