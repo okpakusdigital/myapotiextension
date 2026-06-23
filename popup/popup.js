@@ -128,12 +128,14 @@ function timeAgo(iso) {
 // ── Event type label + icon ──
 function eventLabel(type) {
   switch (type) {
-    case "added":   return { icon: "✅", label: "added" };
-    case "updated": return { icon: "✏️", label: "updated" };
-    case "sale":    return { icon: "🧾", label: "sold" };
-    case "stock":   return { icon: "📥", label: "received" };
-    case "deleted": return { icon: "🗑️", label: "deleted" };
-    default:        return { icon: "✅", label: "synced" };
+    case "added":     return { icon: "✅", label: "added" };
+    case "updated":   return { icon: "✏️", label: "updated" };
+    case "sale":      return { icon: "🧾", label: "sold" };
+    case "stock":     return { icon: "📥", label: "received" };
+    case "deleted":   return { icon: "🗑️", label: "deleted" };
+    case "queued":    return { icon: "⏳", label: "queued — waiting for desktop app" };
+    case "not_found": return { icon: "❌", label: "update failed — not found in MyApoti" };
+    default:          return { icon: "✅", label: "synced" };
   }
 }
 

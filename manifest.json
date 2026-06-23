@@ -31,8 +31,7 @@
         "content_scripts/utils.js",
         "content_scripts/detector.js",
         "content_scripts/smart_reader.js",
-        "content_scripts/universal.js",
-        "content_scripts/content.js"
+        "content_scripts/universal.js"
       ],
       "run_at": "document_idle",
       "all_frames": false

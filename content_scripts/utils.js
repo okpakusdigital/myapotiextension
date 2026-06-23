@@ -41,6 +41,17 @@ window.MyApotiUtils = {
     });
   },
 
+  // ── Public — current queue length ──
+  // Exposed for callers (e.g. universal.js's notifyQueueStatus) that need
+  // to report an accurate pending count immediately after an operation
+  // gets queued — sendToMyApoti returns null in that case (same as any
+  // other non-2xx outcome), so there's no response body to read counts
+  // from. This lets the caller ask the queue directly instead.
+  async getPendingQueueLength() {
+    const queue = await this._getPendingQueue();
+    return queue.length;
+  },
+
   // ── Read the pending operations queue ──
   _getPendingQueue() {
     return new Promise((resolve) => {
@@ -78,42 +89,82 @@ window.MyApotiUtils = {
   // operation fails for a non-connectivity reason (4xx/5xx), it is dropped
   // from the queue same as it would be on a normal call — only
   // connectivity failures get re-queued.
+  _retryTickInProgress: false,
+
   startRetryLoop() {
     if (this._retryTimer) return; // already running
 
     this._retryTimer = setInterval(async () => {
-      const queue = await this._getPendingQueue();
-      if (queue.length === 0) {
-        clearInterval(this._retryTimer);
-        this._retryTimer = null;
-        return;
-      }
+      // ── Re-entrancy guard ──
+      // setInterval does NOT wait for an async callback to finish before
+      // scheduling the next tick. If isDesktopRunning()'s health check
+      // plus the replay's own fetch() calls take longer than
+      // RETRY_INTERVAL_MS (5s) — plausible under any real latency — the
+      // next tick fires while this one is still mid-flight. Both ticks
+      // then read the same still-queued item (since _setPendingQueue([])
+      // below hasn't run yet for the first tick), and BOTH replay it —
+      // producing two real POSTs to the backend for one queued operation.
+      // Observed in practice: one offline sale, two successful
+      // /extension/sync-sale calls moments apart, two cloud-sync queue
+      // rows instead of one. This flag makes overlapping ticks a no-op
+      // instead of a duplicate replay.
+      if (this._retryTickInProgress) return;
+      this._retryTickInProgress = true;
 
-      const running = await this.isDesktopRunning();
-      if (!running) {
-        console.log(`MyApoti: Still offline — ${queue.length} operation(s) remain queued`);
-        return;
-      }
+      try {
+        const queue = await this._getPendingQueue();
+        if (queue.length === 0) {
+          clearInterval(this._retryTimer);
+          this._retryTimer = null;
+          return;
+        }
 
-      // Backend is up — snapshot and clear the queue, then replay each
-      // operation. Use _sendDirect (bypasses the queueing check) so a
-      // mid-replay connectivity blip re-queues only what's left.
-      await this._setPendingQueue([]);
+        const running = await this.isDesktopRunning();
+        if (!running) {
+          console.log(`MyApoti: Still offline — ${queue.length} operation(s) remain queued`);
+          return;
+        }
 
-      console.log(`MyApoti: Backend back online — replaying ${queue.length} queued operation(s)`);
+        // Backend is up — snapshot and clear the queue, then replay each
+        // operation. Use _sendDirect (bypasses the queueing check) so a
+        // mid-replay connectivity blip re-queues only what's left.
+        await this._setPendingQueue([]);
 
-      for (const op of queue) {
-        await this._sendDirect(op.endpoint, op.payload, op.method, true);
-      }
+        console.log(`MyApoti: Backend back online — replaying ${queue.length} queued operation(s)`);
 
-      const remaining = await this._getPendingQueue();
-      if (remaining.length === 0) {
-        clearInterval(this._retryTimer);
-        this._retryTimer = null;
-        chrome.runtime.sendMessage({ action: "desktop_back_online" });
-        console.log("MyApoti: ✅ Queue fully flushed");
-      } else {
-        console.log(`MyApoti: ${remaining.length} operation(s) still queued after replay`);
+        for (const op of queue) {
+          await this._sendDirect(op.endpoint, op.payload, op.method, true);
+        }
+
+        const remaining = await this._getPendingQueue();
+
+        // ── Keep storage's queue counts honest immediately after a flush ──
+        // notifyQueueStatus (in universal.js) normally owns updating these
+        // on each individual sync, but a replay here doesn't go through
+        // that path — _sendDirect's return values are discarded above,
+        // since utils.js doesn't have the drug names or context needed to
+        // build a recent_syncs entry per item. Without this, queue_pending
+        // would stay stale at its pre-flush value until some unrelated
+        // sync happened to touch it next.
+        chrome.storage.local.set({ queue_pending: remaining.length });
+        chrome.runtime.sendMessage({
+          action:        "queue_status_update",
+          queue_pending: remaining.length,
+          queue_failed:  0,
+          drug_names:    [],
+          event_type:    "flush",
+        });
+
+        if (remaining.length === 0) {
+          clearInterval(this._retryTimer);
+          this._retryTimer = null;
+          chrome.runtime.sendMessage({ action: "desktop_back_online" });
+          console.log("MyApoti: ✅ Queue fully flushed");
+        } else {
+          console.log(`MyApoti: ${remaining.length} operation(s) still queued after replay`);
+        }
+      } finally {
+        this._retryTickInProgress = false;
       }
     }, this.RETRY_INTERVAL_MS);
   },
@@ -135,6 +186,17 @@ window.MyApotiUtils = {
   // isReplay=true skips the queueing step on connectivity failure and
   // instead lets the caller (startRetryLoop) decide whether to re-queue,
   // preventing infinite recursion between sendToMyApoti and the retry loop.
+  //
+  // Return contract: resolves to the parsed response body on success,
+  // or null on any failure (not logged in, connectivity error after
+  // queueing, 4xx/5xx, timeout). The ONE exception is the queued case —
+  // that resolves to { __queued: true, queue_length } instead of null,
+  // so callers that care (e.g. universal.js's notifyQueueStatus) can
+  // distinguish "this was queued, report pending count" from "this
+  // genuinely failed, nothing to report" without an extra storage
+  // round-trip or fragile shared state. Every existing caller's
+  // `if (result)` check still treats this as a normal failure unless it
+  // explicitly checks `result?.__queued`, so this is backward compatible.
   async _sendDirect(endpoint, payload, method, isReplay) {
     const token = await this.getToken();
     if (!token) {
@@ -156,6 +218,7 @@ window.MyApotiUtils = {
         console.log(`MyApoti: Operation queued (${queueLength} pending) — will retry when desktop app is ready`);
         chrome.runtime.sendMessage({ action: "desktop_offline" });
         this.startRetryLoop();
+        return { __queued: true, queue_length: queueLength };
       } else {
         // Replay hit a connectivity failure mid-batch — put it back.
         await this._enqueueOperation(endpoint, payload, method);

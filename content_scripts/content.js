@@ -10,11 +10,11 @@
   "use strict";
 
   // ── Constants ──────────────────────────────────────────────────────────────
-  const MYAPOTI_API   = "http://127.0.0.1:8000";
-  const SCAN_DELAY_MS = 1500;   // wait for dynamic pages to finish rendering
-  const MIN_DRUG_ROWS = 3;      // ignore tiny tables (< 3 valid drug rows)
-  const MIN_CONFIDENCE = 25;    // minimum smart reader confidence % to attempt sync
-  const STORAGE_KEY_PREFIX = "myapoti_synced_"; // dedup key prefix
+  const MYAPOTI_API        = "http://127.0.0.1:8000";
+  const SCAN_DELAY_MS      = 1500;
+  const MIN_DRUG_ROWS      = 3;
+  const MIN_CONFIDENCE     = 25;
+  const STORAGE_KEY_PREFIX = "myapoti_synced_";
 
   // ── Field patterns (mirrored from App.jsx SmartReader) ────────────────────
   const FIELD_PATTERNS = {
@@ -76,7 +76,6 @@
     let totalScore = 0;
     const maxScore = Object.values(FIELD_PATTERNS).reduce((s, c) => s + c.weight, 0);
 
-    // Map each field to best matching header
     for (const [field, config] of Object.entries(FIELD_PATTERNS)) {
       let bestIdx = -1, bestScore = 0;
       for (const hdr of hdrs) {
@@ -90,7 +89,6 @@
       if (bestIdx >= 0) { colMap[field] = bestIdx; totalScore += bestScore; }
     }
 
-    // Fix: if generic_name and brand_name mapped to same col, find best brand_name alt
     if (colMap.generic_name !== undefined && colMap.brand_name !== undefined &&
         colMap.generic_name === colMap.brand_name) {
       const brandPatterns = FIELD_PATTERNS.brand_name.headers;
@@ -108,7 +106,6 @@
       else delete colMap.brand_name;
     }
 
-    // Price disambiguation
     const priceHdrs = hdrs.filter(h => PRICE_SELLING_CLUES.some(c => h.text.includes(c)));
     const costHdrs  = hdrs.filter(h => PRICE_COST_CLUES.some(c => h.text.includes(c)));
     if (priceHdrs.length > 0 && costHdrs.length > 0) {
@@ -129,7 +126,6 @@
       }
     }
 
-    // Description vs Name disambiguation
     const drugNameScore = (text) => {
       if (!text) return 0;
       const t = text.toLowerCase().trim();
@@ -165,7 +161,6 @@
       if (ds > ns + 0.3) colMap.generic_name = descHdr.idx;
     }
 
-    // Dosage form by values
     if (colMap.dosage_form === undefined) {
       for (let i = 0; i < headers.length; i++) {
         const matches = rows.slice(0, 5).filter(r => {
@@ -178,7 +173,6 @@
 
     const confidence = Math.round((totalScore / maxScore) * 100);
 
-    // Extract drugs
     const drugs = rows.filter(r => r.some(c => c.trim())).map(row => {
       const getCell = (field) => {
         const idx = colMap[field];
@@ -217,12 +211,10 @@
     const rows = Array.from(table.querySelectorAll("tr"));
     if (rows.length < 2) return null;
 
-    // Find header row — first row with th elements, or first tr
     let headerRow = rows.find(r => r.querySelectorAll("th").length > 0) || rows[0];
     const headerCells = Array.from(
       headerRow.querySelectorAll("th, td")
     ).map(cell => {
-      // Handle editable tables where headers are inside <input> elements
       const input = cell.querySelector("input");
       if (input && input.value && input.value.trim()) return input.value.trim();
       return (cell.innerText || cell.textContent || "").replace(/\s+/g, " ").trim();
@@ -230,11 +222,9 @@
 
     if (headerCells.length < 2) return null;
 
-    // Data rows — everything after header
     const headerRowIndex = rows.indexOf(headerRow);
     const dataRows = rows.slice(headerRowIndex + 1).map(row =>
       Array.from(row.querySelectorAll("td")).map(cell => {
-        // Handle editable tables where cells are inside <input> elements
         const input = cell.querySelector("input");
         if (input && input.value && input.value.trim()) return input.value.trim();
         return (cell.innerText || cell.textContent || "").trim();
@@ -260,59 +250,68 @@
   }
 
   // ── Send drugs to MyApoti backend ─────────────────────────────────────────
-  async function sendDrugsToMyApoti(drugs) {
+  async function sendDrugsToMyApoti(drugs, confidence) {
     const token = await getToken();
     if (!token) {
       console.warn("[MyApoti] No auth token found — not syncing");
       return { success: false, reason: "no_token" };
     }
 
-    let synced = 0, failed = 0;
-
-    for (const drug of drugs) {
-      try {
-        const res = await fetch(`${MYAPOTI_API}/pharmacies/add`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            generic_name:    drug.generic_name,
-            brand_name:      drug.brand_name      || null,
-            quantity:        drug.quantity         || 0,
-            price:           drug.price,
-            cost_price:      drug.cost_price       || null,
-            strength:        drug.strength         || null,
-            dosage_form:     drug.dosage_form      || null,
-            expiration_date: drug.expiration_date  || null,
-            nafdac_number:   drug.nafdac_number    || null,
-            manufacturer:    drug.manufacturer     || null,
-            source:          "hmis_scrape",
-          }),
-        });
-
-        if (res.ok) {
-          synced++;
-        } else if (res.status === 409) {
-          // Drug already exists — not an error
-          synced++;
-        } else {
-          failed++;
-          console.warn(`[MyApoti] Failed to add ${drug.generic_name}: HTTP ${res.status}`);
-        }
-      } catch (err) {
-        failed++;
-        console.warn(`[MyApoti] Network error adding ${drug.generic_name}:`, err.message);
-      }
+    const utils = window.MyApotiUtils;
+    if (!utils) {
+      console.warn("[MyApoti] utils.js not loaded — cannot sync");
+      return { success: false, reason: "utils_missing" };
     }
 
-    return { success: true, synced, failed };
+    const result = await utils.sendToMyApoti("/extension/sync-inventory", {
+      source:     "hmis_scrape",
+      confidence: confidence ?? 50,
+      // method intentionally omitted — absence signals scrape to backend
+      drugs: drugs.map(drug => ({
+        generic_name:    drug.generic_name,
+        brand_name:      drug.brand_name      || null,
+        quantity:        drug.quantity         || 0,
+        price:           drug.price,
+        cost_price:      drug.cost_price       || null,
+        strength:        drug.strength         || null,
+        dosage_form:     drug.dosage_form      || null,
+        expiration_date: drug.expiration_date  || null,
+        nafdac_number:   drug.nafdac_number    || null,
+        manufacturer:    drug.manufacturer     || null,
+      })),
+    });
+
+    if (result?.__queued) {
+      return { success: true, synced: 0, failed: 0, queued: true,
+               skipped: 0, already_exists: 0 };
+    }
+
+    if (result) {
+      // ── Read the actual breakdown from the backend response.
+      // Previously this always reported `drugs.length` as synced regardless
+      // of what the backend actually did — masking already_exists conflicts
+      // and making the log misleading ("Synced 8 drugs" when all 8 were
+      // skipped because they already existed).
+      const synced        = (result.added   || 0) + (result.updated || 0);
+      const skipped       = result.skipped  || 0;
+      const already       = result.already_exists || 0;
+      const failed        = result.failed   || 0;
+      return {
+        success:        true,
+        synced,
+        failed,
+        queued:         false,
+        skipped,
+        already_exists: already,
+      };
+    }
+
+    return { success: false, synced: 0, failed: drugs.length,
+             reason: "send_failed" };
   }
 
   // ── Deduplication — skip pages already synced this session ────────────────
   function getPageKey() {
-    // Use pathname + hostname as page identity
     return `${location.hostname}${location.pathname}`;
   }
 
@@ -359,7 +358,8 @@
       if (!extracted) continue;
 
       const result = readSmartTable(extracted.headers, extracted.rows);
-      console.log(`[MyApoti] Table headers:`, extracted.headers, `confidence: ${result.confidence}% drugs: ${result.drugs.length}`);
+      console.log(`[MyApoti] Table headers:`, extracted.headers,
+        `confidence: ${result.confidence}% drugs: ${result.drugs.length}`);
 
       if (result.confidence > bestScore && result.drugs.length >= MIN_DRUG_ROWS) {
         bestScore  = result.confidence;
@@ -381,15 +381,34 @@
       confidence,
     });
 
-    const result = await sendDrugsToMyApoti(drugs);
+    const result = await sendDrugsToMyApoti(drugs, confidence);
 
     if (result.success) {
-      markSyncedThisSession();
-      console.log(`[MyApoti] ✅ Synced ${result.synced} drugs, ${result.failed} failed`);
+      if (!result.queued) {
+        markSyncedThisSession();
+      } else {
+        console.log("[MyApoti] Sync queued until desktop app is ready — page NOT marked synced");
+      }
+
+      // ── Accurate breakdown log ──
+      // Previously always showed "Synced N drugs" regardless of what the
+      // backend actually did. Now shows a truthful breakdown so it's clear
+      // when drugs were skipped because they already exist vs genuinely synced.
+      const parts = [];
+      if (result.synced        > 0) parts.push(`${result.synced} synced`);
+      if (result.already_exists > 0) parts.push(`${result.already_exists} already exist (skipped)`);
+      if (result.skipped       > 0) parts.push(`${result.skipped} skipped`);
+      if (result.failed        > 0) parts.push(`${result.failed} failed`);
+      if (result.queued)             parts.push("queued");
+      console.log(`[MyApoti] ✅ ${parts.join(", ") || "nothing to sync"}`);
+
       notifyBackground("myapoti_scrape_complete", {
-        url:    location.href,
-        synced: result.synced,
-        failed: result.failed,
+        url:           location.href,
+        synced:        result.synced,
+        already_exists: result.already_exists,
+        skipped:       result.skipped,
+        failed:        result.failed,
+        queued:        result.queued || false,
       });
     } else {
       console.warn(`[MyApoti] Sync skipped: ${result.reason}`);
@@ -406,38 +425,33 @@
       setTimeout(scanAndSync, SCAN_DELAY_MS);
     });
   } else {
-    // Page already loaded (e.g. SPA navigation)
     setTimeout(scanAndSync, SCAN_DELAY_MS);
   }
 
   // ── SPA support — rescan on URL changes OR new tables appearing ──────────
-  let lastUrl = location.href;
+  let lastUrl        = location.href;
   let lastTableCount = document.querySelectorAll("table").length;
-  let rescanTimer = null;
+  let rescanTimer    = null;
 
   const spaObserver = new MutationObserver(() => {
-    // Rescan on URL change (hash routing)
     if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      lastTableCount = 0; // reset so new tables trigger rescan
+      lastUrl        = location.href;
+      lastTableCount = 0;
       console.log("[MyApoti] URL changed — rescanning");
       clearTimeout(rescanTimer);
       rescanTimer = setTimeout(() => {
-        // Clear session dedup for new page
         try { sessionStorage.removeItem(STORAGE_KEY_PREFIX + getPageKey()); } catch(e) {}
         scanAndSync();
       }, SCAN_DELAY_MS);
       return;
     }
 
-    // Rescan when a new table appears (tab switch in SPA)
     const currentTableCount = document.querySelectorAll("table").length;
     if (currentTableCount !== lastTableCount) {
       lastTableCount = currentTableCount;
       clearTimeout(rescanTimer);
       rescanTimer = setTimeout(() => {
         console.log("[MyApoti] New table detected — rescanning");
-        // Clear session dedup so we can resync new content
         try { sessionStorage.removeItem(STORAGE_KEY_PREFIX + getPageKey()); } catch(e) {}
         scanAndSync();
       }, SCAN_DELAY_MS);
@@ -445,7 +459,7 @@
   });
 
   spaObserver.observe(document.body || document.documentElement, {
-    subtree: true,
+    subtree:   true,
     childList: true,
   });
 
